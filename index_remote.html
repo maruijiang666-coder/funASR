@@ -1,0 +1,1468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实时字幕 · Realtime Caption</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #000;
+    color: #fff;
+    font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, "PingFang SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  :root {
+    --accent: #0a84ff;
+    --bg-panel: #0a0a0a;
+    --bg-elev: #141414;
+    --border: rgba(255,255,255,0.08);
+    --border-strong: rgba(255,255,255,0.15);
+    --text: #fff;
+    --text-dim: #888;
+    --text-faint: #555;
+  }
+
+  /* ===== 整体布局 ===== */
+  .app { display: grid; grid-template-columns: 1fr 360px; height: 100vh; }
+  .app.panel-collapsed { grid-template-columns: 1fr 0px; }
+
+  .main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+
+  .top {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 24px 40px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .top .left { display: flex; align-items: center; gap: 14px; }
+  .brand { font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-dim); }
+  .clock { font-size: 24px; font-weight: 200; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; color: var(--text); }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 12px; letter-spacing: 0.08em; color: var(--text-dim); text-transform: uppercase; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #333; transition: background 0.3s, box-shadow 0.3s; }
+  .dot.live { background: #ff3b30; box-shadow: 0 0 12px #ff3b30; animation: pulse 1.4s infinite; }
+  .dot.live-meeting { background: var(--accent); box-shadow: 0 0 12px var(--accent); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .stream { flex: 1; overflow-y: auto; padding: 30px 40px 260px; scroll-behavior: smooth; }
+  .stream::-webkit-scrollbar { width: 6px; }
+  .stream::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+
+  .empty { text-align: center; color: var(--text-faint); font-size: 16px; font-weight: 300; margin-top: 20vh; letter-spacing: 0.05em; }
+
+  .line { display: flex; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--border); opacity: 0; transform: translateY(8px); animation: fadeUp 0.4s forwards; }
+  @keyframes fadeUp { to { opacity: 1; transform: translateY(0); } }
+  .line .time { flex-shrink: 0; width: 90px; padding-top: 5px; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-faint); letter-spacing: 0.05em; }
+  .line .tag { flex-shrink: 0; width: 110px; padding-top: 5px; font-size: 11px; letter-spacing: 0.05em; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+  .line .tag .swatch { width: 8px; height: 8px; border-radius: 50%; background: #444; flex-shrink: 0; }
+  .line.pending .tag .swatch { background: repeating-linear-gradient(45deg, #444 0 4px, #222 4px 8px); }
+  .line .body { flex: 1; min-width: 0; }
+  .line .text { font-size: 19px; font-weight: 300; line-height: 1.55; letter-spacing: -0.005em; color: var(--text); word-break: break-word; }
+  .line .meta { font-size: 10px; color: var(--text-faint); margin-top: 6px; letter-spacing: 0.05em; }
+  .line .engine { font-size: 9px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.05); margin-left: 6px; color: var(--text-faint); letter-spacing: 0.08em; }
+
+  .line.collapsed .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.5; }
+  .line .toggle { flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: rgba(255,255,255,0.05); border: none; color: var(--text-dim); cursor: pointer; font-size: 11px; line-height: 1; display: flex; align-items: center; justify-content: center; transition: all 0.2s; margin-top: 4px; }
+  .line .toggle:hover { background: rgba(255,255,255,0.12); color: var(--text); }
+
+  /* ===== 实时 partial 字幕 (卡拉OK 字幕感) ===== */
+  .line.partial .text { color: var(--text-dim); font-style: italic; }
+  .line.partial .text::after {
+    content: '▌'; display: inline-block; margin-left: 2px;
+    color: var(--accent); animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .line.partial { border-bottom: 1px dashed rgba(10,132,255,0.4); }
+
+  .controls { position: absolute; bottom: 0; left: 0; right: 0; padding: 20px 40px 30px; display: flex; justify-content: center; align-items: center; gap: 12px; background: linear-gradient(transparent, #000 50%); z-index: 10; }
+
+  button { background: rgba(255,255,255,0.06); color: #fff; border: 1px solid var(--border-strong); border-radius: 980px; padding: 12px 24px; font-size: 13px; font-family: inherit; letter-spacing: 0.02em; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(20px); }
+  button:hover { background: rgba(255,255,255,0.12); }
+  button.primary { background: #fff; color: #000; border-color: #fff; }
+  button.primary:hover { background: #e0e0e0; }
+  button.accent { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.accent:hover { background: #0066cc; }
+  button.danger { color: #ff3b30; border-color: rgba(255,59,48,0.3); }
+  button.danger:hover { background: rgba(255,59,48,0.1); }
+  button:disabled { opacity: 0.3; cursor: not-allowed; }
+  button.icon { padding: 12px; width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+
+  .panel { background: var(--bg-panel); border-left: 1px solid var(--border); overflow-y: auto; overflow-x: hidden; transition: margin-right 0.3s; }
+  .panel::-webkit-scrollbar { width: 6px; }
+  .panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+  .app.panel-collapsed .panel { margin-right: -360px; }
+
+  .panel-section { padding: 24px 22px; border-bottom: 1px solid var(--border); }
+  .panel-title { font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+
+  .setting { margin-bottom: 14px; }
+  .setting label { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text); cursor: pointer; padding: 8px 0; }
+  .setting .hint { font-size: 11px; color: var(--text-faint); margin-top: 4px; line-height: 1.5; }
+  .setting input[type="text"] { width: 100%; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; color: var(--text); font-size: 13px; font-family: inherit; outline: none; margin-top: 6px; }
+  .setting input[type="text"]:focus { border-color: var(--accent); }
+
+  .switch { position: relative; width: 40px; height: 22px; background: #333; border-radius: 22px; transition: background 0.2s; cursor: pointer; flex-shrink: 0; }
+  .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: #fff; border-radius: 50%; transition: transform 0.2s; }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { transform: translateX(18px); }
+
+  .btn-stack { display: flex; flex-direction: column; gap: 8px; }
+  .btn-stack button { width: 100%; }
+
+  .speaker-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .speaker-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--bg-elev); border-radius: 8px; border: 1px solid var(--border); }
+  .speaker-row .swatch { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .speaker-row .name { flex: 1; font-size: 13px; }
+  .speaker-row input { flex: 1; background: transparent; border: 1px solid transparent; color: var(--text); font-size: 13px; font-family: inherit; padding: 4px 6px; border-radius: 6px; outline: none; }
+  .speaker-row input:focus { border-color: var(--accent); background: var(--bg-panel); }
+  .speaker-row .count { font-size: 10px; color: var(--text-faint); letter-spacing: 0.05em; }
+
+  .meeting-list { display: flex; flex-direction: column; gap: 8px; }
+  .meeting-item { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; padding: 12px; transition: all 0.2s; }
+  .meeting-item:hover { border-color: var(--border-strong); }
+  .meeting-item .title { font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+  .meeting-item .info { font-size: 11px; color: var(--text-faint); letter-spacing: 0.03em; margin-bottom: 8px; }
+  .meeting-item .actions { display: flex; gap: 6px; }
+  .meeting-item .actions button { padding: 6px 10px; font-size: 11px; flex: 1; }
+
+  /* ===== Loading 蒙层 ===== */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(12px);
+    z-index: 9000; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 20px;
+  }
+  .overlay.active { display: flex; }
+  .overlay .spinner {
+    width: 48px; height: 48px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.1); border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .overlay .label { font-size: 14px; letter-spacing: 0.1em; color: var(--text-dim); }
+  .overlay .models { display: flex; gap: 12px; margin-top: 4px; flex-wrap: wrap; justify-content: center; max-width: 600px; }
+  .overlay .model-chip {
+    padding: 6px 12px; border-radius: 980px; font-size: 11px; letter-spacing: 0.05em;
+    border: 1px solid var(--border); color: var(--text-faint); background: rgba(255,255,255,0.03);
+    transition: all 0.3s;
+  }
+  .overlay .model-chip.loaded { color: var(--text); border-color: rgba(48,209,88,0.5); background: rgba(48,209,88,0.08); }
+  .overlay .model-chip.loading { color: var(--accent); border-color: rgba(10,132,255,0.5); background: rgba(10,132,255,0.08); }
+
+  /* ===== 确认对话框 ===== */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); z-index: 9500; display: none; align-items: center; justify-content: center; }
+  .modal-bg.active { display: flex; }
+  .modal { background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 14px; padding: 24px; min-width: 360px; max-width: 480px; }
+  .modal h3 { font-size: 16px; font-weight: 500; margin-bottom: 12px; }
+  .modal p { font-size: 13px; color: var(--text-dim); line-height: 1.6; margin-bottom: 20px; }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ===== 提示条 ===== */
+  .toast { position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%); background: rgba(20,20,20,0.95); border: 1px solid var(--border-strong); border-radius: 980px; padding: 10px 20px; font-size: 12px; color: var(--text); backdrop-filter: blur(20px); opacity: 0; pointer-events: none; transition: opacity 0.3s; z-index: 1000; }
+  .toast.show { opacity: 1; }
+
+  /* ===== 录制中 / 转写中 状态卡 (居中浮层) ===== */
+  .session-overlay {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(20,20,20,0.92);
+    border: 1px solid var(--border-strong);
+    border-radius: 16px;
+    padding: 28px 36px;
+    text-align: center;
+    z-index: 40;
+    min-width: 260px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .session-overlay .so-icon {
+    font-size: 28px;
+    color: #ff3b30;
+    line-height: 1;
+    margin-bottom: 10px;
+  }
+  .session-overlay.transcribing .so-icon { color: var(--accent); animation: spin 2s linear infinite; }
+  .session-overlay.done .so-icon { color: #30d158; }
+  .session-overlay.error .so-icon { color: #ff3b30; }
+  .session-overlay .so-text {
+    font-size: 12px;
+    color: var(--text-dim);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .session-overlay .so-time {
+    font-size: 36px;
+    font-weight: 200;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+  .session-overlay .so-progress {
+    margin-top: 18px;
+    display: none;
+  }
+  .session-overlay.transcribing .so-progress { display: block; }
+  .session-overlay .so-bar {
+    width: 100%;
+    height: 4px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .session-overlay .so-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), #5ac8fa);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.3s;
+  }
+  .session-overlay .so-pct {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 4px;
+  }
+  .session-overlay .so-msg {
+    font-size: 11px;
+    color: var(--text-faint);
+    letter-spacing: 0.05em;
+    min-height: 14px;
+  }
+  .session-overlay .so-download {
+    display: none;
+    margin-top: 16px;
+    padding: 8px 18px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid var(--border-strong);
+    border-radius: 980px;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    transition: all 0.2s;
+  }
+  .session-overlay .so-download:hover {
+    background: rgba(255,255,255,0.15);
+  }
+  .session-overlay.done .so-download { display: inline-block; }
+
+  .line[data-spk-color] .tag { color: var(--text); }
+
+  .meeting-banner { background: linear-gradient(135deg, rgba(10,132,255,0.15), rgba(10,132,255,0.05)); border: 1px solid rgba(10,132,255,0.3); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; display: none; }
+  .meeting-banner.active { display: block; }
+  .meeting-banner .row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-bottom: 4px; }
+  .meeting-banner .row:first-child { color: var(--text); font-weight: 500; }
+  .meeting-banner .row:last-child { color: var(--text-dim); margin-bottom: 0; }
+
+  /* ===== 模型状态条 ===== */
+  .model-status { display: flex; gap: 10px; align-items: center; padding: 8px 12px; background: var(--bg-elev); border-radius: 8px; font-size: 11px; margin-top: 8px; }
+  .model-status .label { color: var(--text-faint); letter-spacing: 0.05em; }
+  .model-status .engine { color: var(--accent); font-weight: 500; letter-spacing: 0.05em; }
+  .model-status .gpu { color: var(--text-faint); margin-left: auto; font-variant-numeric: tabular-nums; }
+
+  /* ===== 文件转写 ===== */
+  .model-pick { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .model-radio { display: flex; gap: 10px; align-items: flex-start; padding: 10px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: all 0.15s; }
+  .model-radio:hover { border-color: var(--border-strong); }
+  .model-radio:has(input:checked) { border-color: var(--accent); background: rgba(10,132,255,0.06); }
+  .model-radio input { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
+  .mr-body { flex: 1; min-width: 0; }
+  .mr-name { font-size: 13px; color: var(--text); margin-bottom: 2px; display: flex; align-items: center; gap: 6px; }
+  .mr-tag { font-size: 9px; padding: 1px 6px; background: var(--accent); color: #fff; border-radius: 3px; letter-spacing: 0.05em; }
+  .mr-desc { font-size: 11px; color: var(--text-faint); line-height: 1.4; }
+
+  .src-tabs { display: flex; gap: 4px; margin: 8px 0 6px; background: var(--bg-elev); border-radius: 8px; padding: 3px; }
+  .src-tab { flex: 1; padding: 6px 0; font-size: 12px; background: transparent; border: none; border-radius: 6px; color: var(--text-dim); cursor: pointer; transition: all 0.15s; }
+  .src-tab.on { background: var(--accent); color: #fff; }
+  .src-pane { margin-top: 6px; }
+  .src-pane input[type="file"] { width: 100%; font-size: 12px; color: var(--text-dim); }
+  .src-pane input[type="text"] { width: 100%; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; color: var(--text); font-size: 12px; font-family: inherit; outline: none; }
+  .src-pane input[type="text"]:focus { border-color: var(--accent); }
+
+  .transcribe-progress { margin-top: 12px; padding: 12px; background: var(--bg-elev); border-radius: 10px; border: 1px solid var(--border); }
+  .tp-stage { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; min-height: 16px; }
+  .tp-bar { width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
+  .tp-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #5ac8fa); transition: width 0.3s; border-radius: 3px; }
+  .tp-pct { font-size: 11px; color: var(--text-faint); text-align: right; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tp-result { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .tp-stat { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.5; }
+  .tp-actions { display: flex; gap: 6px; }
+  .tp-actions button { flex: 1; padding: 8px 0; font-size: 12px; }
+  .transcribe-progress.error .tp-fill { background: #ff3b30; }
+  .transcribe-progress.done .tp-fill { background: #30d158; }
+
+  /* ===== 底部累积字幕条 (会议模式显示完整文本) ===== */
+  /* 放底部、控件上方, 不再压在 stream 字幕列表上面 */
+  .caption-bar {
+    position: fixed; bottom: 110px; left: 24px;
+    max-width: min(900px, calc(100vw - 48px));
+    z-index: 60;
+    background: rgba(10,10,10,0.82);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 12px 18px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 -4px 24px rgba(0,0,0,0.4);
+    font-size: 18px; line-height: 1.5;
+    color: #fff; font-weight: 300;
+    letter-spacing: -0.005em;
+    word-break: break-word;
+    display: none;
+    transition: opacity 0.25s, border-color 0.25s, transform 0.25s;
+  }
+  .caption-bar.active { display: block; }
+  .caption-bar.fading { opacity: 0; pointer-events: none; }
+  .caption-bar .cap-suffix {
+    color: var(--accent); margin-left: 2px;
+    animation: blink 1s steps(1) infinite;
+  }
+  .caption-bar[data-mode="final"] .cap-suffix { display: none; }
+  .caption-bar[data-mode="partial"] { border-color: rgba(10,132,255,0.5); }
+  .caption-bar .cap-meta {
+    font-size: 10px; color: var(--text-faint);
+    letter-spacing: 0.1em; text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .caption-bar .cap-meta .cap-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); margin-right: 6px;
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 1.4s infinite;
+    vertical-align: middle;
+  }
+  .caption-bar[data-mode="final"] .cap-meta .cap-dot { background: #30d158; box-shadow: 0 0 8px #30d158; animation: none; }
+
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; }
+    .app.panel-collapsed { grid-template-columns: 1fr; }
+    .panel { position: fixed; top: 0; right: 0; bottom: 0; width: 320px; z-index: 50; transform: translateX(0); }
+    .app.panel-collapsed .panel { transform: translateX(320px); }
+    .caption-bar { bottom: 90px; left: 12px; right: 12px; max-width: none; font-size: 15px; padding: 10px 14px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 模型加载蒙层 -->
+<div class="overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <div class="label" id="loadingLabel">模型加载中…</div>
+  <div class="models" id="modelChips"></div>
+</div>
+
+<!-- 确认对话框 -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h3 id="modalTitle">确认</h3>
+    <p id="modalBody">…</p>
+    <div class="actions">
+      <button id="modalCancel">取消</button>
+      <button id="modalOk" class="accent">确认</button>
+    </div>
+  </div>
+</div>
+
+<div class="app" id="app">
+
+  <!-- 左上角累积字幕条 (会议模式显示完整文本) -->
+  <div class="caption-bar" id="captionBar" data-mode="partial">
+    <div class="cap-meta"><span class="cap-dot"></span><span id="capMode">会议字幕 · 识别中</span></div>
+    <span id="captionText"></span><span class="cap-suffix">▌</span>
+  </div>
+
+  <div class="main">
+    <div class="top">
+      <div class="left">
+        <span class="dot" id="dot"></span>
+        <span class="brand" id="status">未连接</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:24px">
+        <span class="clock" id="clock">--:--:--</span>
+        <button class="icon" id="togglePanel" title="设置面板">⚙</button>
+      </div>
+    </div>
+
+    <div class="stream" id="stream">
+      <div class="empty" id="empty">点击下方按钮开始</div>
+    </div>
+
+    <div class="controls">
+      <button id="btnRecord" class="primary" disabled>● 开启语音识别</button>
+      <button id="btnMeeting" class="accent" disabled>▣ 开始会议</button>
+      <button id="btnStop" disabled>■ 停止</button>
+    </div>
+
+    <!-- 录制中 / 转写中 状态卡 -->
+    <div class="session-overlay" id="sessionOverlay">
+      <div class="so-icon" id="soIcon">●</div>
+      <div class="so-text" id="soText">录制中</div>
+      <div class="so-time" id="soTime">00:00</div>
+      <div class="so-progress">
+        <div class="so-bar"><div class="so-fill" id="soFill"></div></div>
+        <div class="so-pct" id="soPct">0%</div>
+        <div class="so-msg" id="soMsg">准备中…</div>
+      </div>
+      <a class="so-download" id="downloadLink" href="#" download>↓ 下载录音 WAV</a>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-section">
+      <div class="panel-title">当前会议</div>
+      <div class="meeting-banner" id="meetingBanner">
+        <div class="row"><span id="bannerTitle">—</span><span id="bannerStatus">进行中</span></div>
+        <div class="row"><span id="bannerClock">00:00:00</span><span id="bannerCount">0 段</span></div>
+      </div>
+      <div class="setting">
+        <label>会议标题<input type="text" id="meetingTitle" placeholder="如：产品评审 7.9"></label>
+      </div>
+      <div class="setting">
+        <label>实时保存 JSON 到服务器
+          <span class="switch on" id="saveToggle"></span>
+        </label>
+        <div class="hint">开启后，每条字幕会立即写入服务器 JSON 文件</div>
+      </div>
+      <div class="model-status">
+        <span class="label">引擎</span>
+        <span class="engine" id="engineLabel">—</span>
+        <span class="gpu" id="gpuLabel"></span>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">设置</div>
+      <div class="setting">
+        <label>自动滚动到最新字幕
+          <span class="switch on" id="autoScrollToggle"></span>
+        </label>
+      </div>
+      <div class="setting">
+        <label>显示元数据（时长/推理）
+          <span class="switch on" id="metaToggle"></span>
+        </label>
+      </div>
+      <div class="setting">
+        <label>折叠旧字幕
+          <span class="switch" id="collapseToggle"></span>
+        </label>
+        <div class="hint">保留 5 行可见，更早的折叠成单行</div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">说话人</div>
+      <div class="speaker-list" id="speakerList">
+        <div style="font-size:12px;color:var(--text-faint);padding:8px 0">暂无说话人</div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">文件转写</div>
+
+      <div class="setting">
+        <label style="font-size:12px;color:var(--text-dim)">模型</label>
+        <div class="model-pick" id="modelPick">
+          <label class="model-radio" data-model="paraformer">
+            <input type="radio" name="asrModel" value="paraformer" checked>
+            <div class="mr-body">
+              <div class="mr-name">Paraformer-VAD-Punc <span class="mr-tag">推荐</span></div>
+              <div class="mr-desc">中文 · 离线 · 自带 VAD 切句 + 标点 + 字级时间戳 · 字幕首选</div>
+            </div>
+          </label>
+          <label class="model-radio" data-model="sensevoice">
+            <input type="radio" name="asrModel" value="sensevoice">
+            <div class="mr-body">
+              <div class="mr-name">SenseVoice-Small</div>
+              <div class="mr-desc">234M · 中英日韩粤 5 语 · 60× 实时 · 速度快但无标点</div>
+            </div>
+          </label>
+          <label class="model-radio" data-model="nano">
+            <input type="radio" name="asrModel" value="nano">
+            <div class="mr-body">
+              <div class="mr-name">Fun-ASR-Nano-2512</div>
+              <div class="mr-desc">31 语言 · LLM 加持 · 精度最高 · 启动稍慢</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting">
+        <label style="font-size:12px;color:var(--text-dim)">来源</label>
+        <div class="src-tabs">
+          <button class="src-tab on" data-src="file">上传文件</button>
+          <button class="src-tab" data-src="url">URL 下载</button>
+        </div>
+        <div class="src-pane" data-src="file">
+          <input type="file" id="transcribeFile" accept="audio/*,video/*,.mp4,.mp3,.wav,.m4a,.flac,.ogg,.webm">
+        </div>
+        <div class="src-pane" data-src="url" style="display:none">
+          <input type="text" id="transcribeUrl" placeholder="https://example.com/audio.mp3">
+        </div>
+      </div>
+
+      <div class="setting">
+        <button class="accent" id="btnTranscribe" style="width:100%">开始转写</button>
+      </div>
+
+      <div class="transcribe-progress" id="transcribeProgress" style="display:none">
+        <div class="tp-stage" id="tpStage">准备中…</div>
+        <div class="tp-bar"><div class="tp-fill" id="tpFill" style="width:0%"></div></div>
+        <div class="tp-pct" id="tpPct">0%</div>
+        <div class="tp-result" id="tpResult" style="display:none">
+          <div class="tp-stat" id="tpStat"></div>
+          <div class="tp-actions">
+            <button id="tpDownloadSrt">下载 SRT</button>
+            <button id="tpDownloadJson">下载 JSON</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">历史会议</div>
+      <div class="meeting-list" id="meetingList">
+        <div style="font-size:12px;color:var(--text-faint);padding:8px 0">加载中…</div>
+      </div>
+    </div>
+
+    <div style="padding:20px 22px;color:var(--text-faint);font-size:10px;letter-spacing:0.05em;text-align:center">
+      Fun-ASR-Nano + Paraformer · v2.0
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ===== 配色 =====
+const SPK_COLORS = [
+  '#5ac8fa','#ff3b30','#30d158','#ff9f0a',
+  '#bf5af2','#ffd60a','#ff2d55','#64d2ff',
+  '#a78bfa','#fb7185','#34c759','#ff9500',
+];
+
+// ===== 状态 =====
+const $ = id => document.getElementById(id);
+const state = {
+  mode: 'idle',
+  ws: null,
+  audioCtx: null,
+  workletNode: null,
+  mediaStream: null,
+  sending: false,
+  segCount: 0,
+  segMap: new Map(),
+  knownSpeakers: new Map(),
+  meeting: null,
+  saveToServer: true,
+  autoScroll: true,
+  showMeta: true,
+  collapseOld: false,
+  currentPartialEl: null,        // 当前正在显示的 partial 行 DOM
+  currentPartialText: '',        // 当前 partial 文字 (避免每次 setText 都重建)
+  partialUpdatedAt: 0,           // partial 最后更新时间, 用于超时降级为 segment
+  lastSegSeg: null,              // 最近一次 addSegment 的 seg id, 用于流式段扩展检测
+  captionMode: 'off',            // 左上角字幕条状态: 'off' | 'partial' | 'final'
+  captionAccum: '',              // 字幕条累积文字 (客户端 LCP+LCSuffix 拼接, 不依赖 server 累积)
+  captionLastSentText: '',       // 最近一次 server 推过来的累积文字 (用于去重/扩展)
+  captionClearT: null,           // stop 后延迟清空字幕条的 timer
+};
+
+// ===== 工具 =====
+function toast(msg, dur=2000) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove('show'), dur);
+}
+
+function pad(n) { return String(n).padStart(2, '0'); }
+function nowHMS() {
+  const d = new Date();
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function nowISO() { return new Date().toISOString().replace(/\.\d+Z$/, '').replace('T', ' '); }
+function elideSec(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function colorFor(spk) { return SPK_COLORS[spk % SPK_COLORS.length]; }
+
+function confirmModal(title, body) {
+  return new Promise((resolve) => {
+    $('modalTitle').textContent = title;
+    $('modalBody').textContent = body;
+    $('modalBg').classList.add('active');
+    const okBtn = $('modalOk'), cancelBtn = $('modalCancel');
+    const cleanup = () => {
+      $('modalBg').classList.remove('active');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+    };
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+  });
+}
+
+// ===== 时钟 =====
+setInterval(() => {
+  $('clock').textContent = nowHMS();
+  if (state.meeting) {
+    const elapsed = (Date.now() - state.meeting.startedAt) / 1000;
+    $('bannerClock').textContent = elideSec(elapsed);
+  }
+}, 500);
+
+// ===== 面板折叠 =====
+$('togglePanel').addEventListener('click', () => {
+  $('app').classList.toggle('panel-collapsed');
+});
+
+// ===== 开关 =====
+function bindSwitch(el, key) {
+  el.addEventListener('click', () => {
+    state[key] = !state[key];
+    el.classList.toggle('on', state[key]);
+    if (key === 'collapseOld') applyCollapse();
+  });
+}
+bindSwitch($('saveToggle'), 'saveToServer');
+bindSwitch($('autoScrollToggle'), 'autoScroll');
+bindSwitch($('metaToggle'), 'showMeta');
+bindSwitch($('collapseToggle'), 'collapseOld');
+
+// ===== 说话人 =====
+function ensureSpeaker(spk, name=null) {
+  if (!state.knownSpeakers.has(spk)) {
+    state.knownSpeakers.set(spk, {
+      name: name || `说话人${spk + 1}`,
+      color: colorFor(spk),
+      count: 0,
+    });
+  }
+  const info = state.knownSpeakers.get(spk);
+  info.count++;
+  if (name) info.name = name;
+  refreshSpeakerPanel();
+}
+
+function refreshSpeakerPanel() {
+  const arr = [...state.knownSpeakers.entries()].sort((a,b) => b[1].count - a[1].count);
+  if (!arr.length) {
+    $('speakerList').innerHTML = '<div style="font-size:12px;color:var(--text-faint);padding:8px 0">暂无说话人</div>';
+    return;
+  }
+  $('speakerList').innerHTML = arr.map(([spk, info]) => `
+    <div class="speaker-row" data-spk="${spk}">
+      <span class="swatch" style="background:${info.color}"></span>
+      <input type="text" value="${escapeHtml(info.name)}" placeholder="为此说话人命名" data-spk="${spk}">
+      <span class="count">${info.count}</span>
+    </div>
+  `).join('');
+  $('speakerList').querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      const spk = parseInt(inp.dataset.spk);
+      const name = inp.value.trim();
+      if (!name) return;
+      state.knownSpeakers.get(spk).name = name;
+      for (const [seg, item] of state.segMap) {
+        if (item.spk === spk) {
+          item.spkName = name;
+          const tag = item.el.querySelector('.tag');
+          tag.innerHTML = `<span class="swatch" style="background:${colorFor(spk)}"></span>${escapeHtml(name)}`;
+        }
+      }
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({type: 'rename', spk, name}));
+      }
+      if (state.meeting) {
+        try {
+          await fetch(`/api/meeting/${state.meeting.id}/speaker`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({spk, name}),
+          });
+        } catch (e) {}
+      }
+    });
+  });
+}
+
+// ===== 实时 partial 字幕 (卡拉OK 字幕感) =====
+function ensurePartialLine() {
+  // 若已存在 partial 行就复用, 否则新建一行追加到流尾
+  if (state.currentPartialEl && state.currentPartialEl.parentElement) {
+    return state.currentPartialEl;
+  }
+  if ($('empty').parentElement) $('empty').remove();
+  const line = document.createElement('div');
+  line.className = 'line partial';
+  line.innerHTML = `
+    <div class="time">${escapeHtml(nowHMS())}</div>
+    <div class="tag"><span class="swatch" style="background:#666"></span>识别中</div>
+    <div class="body">
+      <div class="text"></div>
+    </div>
+    <button class="toggle" data-collapsed="0" title="折叠" style="visibility:hidden">▾</button>
+  `;
+  $('stream').appendChild(line);
+  state.currentPartialEl = line;
+  return line;
+}
+
+function updatePartial(text, spk, wall_ms) {
+  const line = ensurePartialLine();
+  // 文字更新 (DOM diff: 仅当变化时写)
+  if (text !== state.currentPartialText) {
+    line.querySelector('.text').textContent = text;
+    state.currentPartialText = text;
+    // 更新时间
+    line.querySelector('.time').textContent = nowHMS();
+  }
+  // 说话人颜色
+  if (spk != null) {
+    const color = colorFor(spk);
+    const tag = line.querySelector('.tag');
+    const swatch = tag.querySelector('.swatch');
+    swatch.style.background = color;
+    tag.innerHTML = `<span class="swatch" style="background:${color}"></span>${escapeHtml(state.knownSpeakers.get(spk)?.name || `说话人${spk+1}`)}`;
+  }
+  state.partialUpdatedAt = Date.now();
+  // 注意: partial 不触发 autoScroll. partial 行已经存在, scrollTop 不变.
+  // 新 segment 出现时由 addSegment 决定是否滚.
+}
+
+function autoFinalizeStalePartial() {
+  // 若 partial 文字存在但 2.5s 内没更新, 把当前 partial 转成正式 segment 行 (空内容则移除)
+  if (!state.currentPartialEl || !state.currentPartialEl.parentElement) return;
+  const age = Date.now() - (state.partialUpdatedAt || 0);
+  if (age < 2500) return;
+  const txt = state.currentPartialText || '';
+  if (txt.trim()) {
+    finalizePartial(true);
+  } else {
+    finalizePartial(false);
+  }
+}
+setInterval(autoFinalizeStalePartial, 1000);
+
+function finalizePartial(asSegment) {
+  // partial → final: 移除 partial 类, 复用 DOM 作为 segment 行
+  if (!state.currentPartialEl || !state.currentPartialEl.parentElement) return;
+  const line = state.currentPartialEl;
+  if (asSegment) {
+    line.classList.remove('partial');
+  } else {
+    // 完全清除 partial 行 (会议模式下 VAD 判定静音, 移除临时行)
+    line.remove();
+  }
+  state.currentPartialEl = null;
+  state.currentPartialText = '';
+}
+
+// ===== 左上角累积字幕条 =====
+// 会议模式下显示从会议开始到现在的所有识别文字 (完整文本),
+// 不依赖 partial/segment 行的 DOM, 独立固定在左上角.
+// ★ 客户端累积: server 的 partial.text 可能是单 chunk 独立结果 ("你好" / "世界" / "今天"),
+//   也可能是流式累积视图 ("你好" → "你好世界" → "你好世界今天").
+//   用 LCP (最长公共前缀) + LCSuffix (最长公共后缀) 算法, 兼容两种情况,
+//   并自动去掉 VAD 边界处的字符重叠.
+function setCaptionText(text) {
+  $('captionText').textContent = text || '';
+  if (text) {
+    $('captionBar').classList.add('active');
+    $('captionBar').classList.remove('fading');
+  }
+}
+
+function _mergeIntoAccum(newText) {
+  // 把 newText 合并到 state.captionAccum, 返回新的 accum.
+  // 合并规则:
+  //   1) newText 是 accum 的扩展 (startsWith): 直接用 newText 替换 (server 流式累积场景)
+  //   2) accum 是 newText 的扩展: 保持 accum (server reset / 重复帧)
+  //   3) accum 已包含 newText: 保持 accum (重复帧)
+  //   4) newText 已包含 accum: 用 newText 替换 (不太可能, 但覆盖)
+  //   5) 否则 (独立 chunk): 找 LCSuffix (最长公共后缀) 去掉重叠, 再追加.
+  //      LCSuffix 上限 30 字符, 避免边界处的微小重叠被误判为完全不重叠.
+  const cur = state.captionAccum || '';
+  const inc = newText || '';
+  if (!inc) return cur;
+  if (!cur) return inc;
+  if (inc.startsWith(cur)) return inc;
+  if (cur.startsWith(inc)) return cur;
+  if (cur.includes(inc)) return cur;
+  if (inc.includes(cur)) return inc;
+  // 找 cur 末尾和 inc 开头的最长公共部分 (字符级 LCSuffix)
+  const cap = Math.min(cur.length, inc.length, 30);
+  let overlap = 0;
+  for (let k = cap; k > 0; k--) {
+    if (cur.endsWith(inc.slice(0, k))) { overlap = k; break; }
+  }
+  return cur + inc.slice(overlap);
+}
+
+function showCaptionPartial(text) {
+  if (!text) return;
+  if (state.captionClearT) { clearTimeout(state.captionClearT); state.captionClearT = null; }
+  state.captionMode = 'partial';
+  state.captionLastSentText = text;
+  state.captionAccum = _mergeIntoAccum(text);
+  setCaptionText(state.captionAccum);
+  $('captionBar').dataset.mode = 'partial';
+  $('capMode').textContent = '会议字幕 · 识别中';
+}
+
+function updateCaptionFromSegment(msg) {
+  // segment.text 是 final 帧 (上一段累积的最终文字). 用同样的累积算法合并,
+  // 让客户端始终保持 captionAccum 是从会议开始到现在的最完整视图.
+  const sent = msg.text || '';
+  if (!sent) return;
+  if (state.captionClearT) { clearTimeout(state.captionClearT); state.captionClearT = null; }
+  state.captionMode = 'partial';
+  state.captionLastSentText = sent;
+  state.captionAccum = _mergeIntoAccum(sent);
+  setCaptionText(state.captionAccum);
+  $('captionBar').dataset.mode = 'partial';
+  $('capMode').textContent = '会议字幕 · 识别中';
+}
+
+function finalizeCaption() {
+  // 切走 / 停止 / WebSocket 关闭时调用: 把字幕条从"识别中"切到"已结束" (绿点, 不再闪烁),
+  // 文字保留 4s 后淡出. 不清空 (用户还能看到最终识别结果).
+  if (state.captionMode === 'off') return;
+  state.captionMode = 'final';
+  $('captionBar').dataset.mode = 'final';
+  $('capMode').textContent = '会议字幕 · 已结束';
+  if (state.captionClearT) clearTimeout(state.captionClearT);
+  state.captionClearT = setTimeout(() => {
+    $('captionBar').classList.add('fading');
+    setTimeout(() => {
+      clearCaption();
+    }, 350);
+  }, 4000);
+}
+
+function clearCaption() {
+  // 完全重置 (新一轮会议开始 / 录音模式不需要字幕条)
+  state.captionMode = 'off';
+  state.captionAccum = '';
+  state.captionFinalText = '';
+  state.captionLastSentText = '';
+  if (state.captionClearT) { clearTimeout(state.captionClearT); state.captionClearT = null; }
+  $('captionText').textContent = '';
+  $('captionBar').classList.remove('active', 'fading');
+  $('captionBar').dataset.mode = 'partial';
+}
+
+function addSegment(msg) {
+  if ($('empty').parentElement) $('empty').remove();
+
+  // 把当前 partial 行"凝固"成正式行 (如果存在), 然后 segment 作为新行追加
+  // 这样 partial 和 segment 永远不会在同一行上互相覆盖
+  if (state.currentPartialEl && state.currentPartialEl.parentElement) {
+    finalizePartial(true);
+  }
+
+  const line = document.createElement('div');
+  line.className = 'line';
+  line.dataset.seg = msg.seg;
+  const engine = msg.engine || '?';
+  const metaHtml = state.showMeta
+    ? `<div class="meta">#${msg.seg} · ${msg.audio_len}s · 推理 ${msg.asr_dur}s<span class="engine">${engine}</span></div>`
+    : '';
+  const spkName = msg.spk_name || '识别中…';
+  const color = msg.spk != null ? colorFor(msg.spk) : '#666';
+  line.innerHTML = `
+    <div class="time">${escapeHtml(msg.ts || nowHMS())}</div>
+    <div class="tag"><span class="swatch" style="background:${color}"></span>${escapeHtml(spkName)}</div>
+    <div class="body">
+      <div class="text">${escapeHtml(msg.text)}</div>
+      ${metaHtml}
+    </div>
+    <button class="toggle" data-collapsed="0" title="折叠">▾</button>
+  `;
+  $('stream').appendChild(line);
+  state.segMap.set(msg.seg, {
+    el: line,
+    spk: msg.spk,
+    spkName: msg.spk_name,
+    text: msg.text,
+    ts: msg.ts || nowHMS(),
+    msg,
+  });
+
+  line.querySelector('.toggle').addEventListener('click', () => {
+    const isCollapsed = line.classList.toggle('collapsed');
+    line.querySelector('.toggle').textContent = isCollapsed ? '▸' : '▾';
+  });
+
+  if (state.collapseOld) applyCollapse();
+
+  if (state.autoScroll) {
+    requestAnimationFrame(() => $('stream').scrollTop = $('stream').scrollHeight);
+  }
+
+  // 会议模式: 立即落盘到服务器 JSON (不依赖 spk_update, 避免段丢失)
+  if (state.meeting && state.saveToServer) {
+    fetch(`/api/meeting/${state.meeting.id}/append`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(msg),
+    }).catch((e) => console.warn('[append] failed:', e));
+  }
+}
+
+function applyCollapse() {
+  const lines = [...$('stream').querySelectorAll('.line')];
+  const keep = 5;
+  lines.forEach((line, i) => {
+    if (state.collapseOld && i < lines.length - keep) {
+      line.classList.add('collapsed');
+      const btn = line.querySelector('.toggle');
+      if (btn) btn.textContent = '▸';
+    }
+  });
+}
+
+function applySpeaker(seg, spk, spkName) {
+  const item = state.segMap.get(seg);
+  if (!item) return;
+  item.spk = spk;
+  item.spkName = spkName || state.knownSpeakers.get(spk)?.name || `说话人${spk + 1}`;
+  ensureSpeaker(spk, item.spkName);
+
+  const color = colorFor(spk);
+  const tag = item.el.querySelector('.tag');
+  tag.innerHTML = `<span class="swatch" style="background:${color}"></span>${escapeHtml(item.spkName)}`;
+  item.el.style.setProperty('--spk-color', color);
+  item.msg.spk = spk;
+  item.msg.spk_name = item.spkName;
+
+  if (state.meeting && state.saveToServer) {
+    fetch(`/api/meeting/${state.meeting.id}/append`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(item.msg),
+    }).catch(() => {});
+  }
+}
+
+// ===== 历史会议 =====
+async function refreshMeetings() {
+  try {
+    const r = await fetch('/api/meetings');
+    const list = await r.json();
+    if (!list.length) {
+      $('meetingList').innerHTML = '<div style="font-size:12px;color:var(--text-faint);padding:8px 0">还没有会议</div>';
+      return;
+    }
+    $('meetingList').innerHTML = list.map(m => `
+      <div class="meeting-item" data-id="${m.id}">
+        <div class="title">${escapeHtml(m.title)}</div>
+        <div class="info">${m.created_at} · ${m.segments} 段 · ${m.speakers} 说话人${m.finished_at ? '' : ' · 进行中'}</div>
+        <div class="actions">
+          <button onclick="downloadMeeting('${m.id}')">下载</button>
+          <button class="danger" onclick="deleteMeeting('${m.id}', '${escapeHtml(m.title)}')">删除</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    $('meetingList').innerHTML = '<div style="font-size:12px;color:#ff3b30;padding:8px 0">加载失败</div>';
+  }
+}
+window.downloadMeeting = (id) => { window.location.href = `/api/meeting/${id}/download`; };
+window.deleteMeeting = async (id, title) => {
+  const ok = await confirmModal('删除会议', `确定删除「${title}」？此操作不可撤销。`);
+  if (!ok) return;
+  try {
+    const r = await fetch(`/api/meeting/${id}`, {method: 'DELETE'});
+    const d = await r.json();
+    if (d.ok) {
+      toast('已删除');
+      refreshMeetings();
+    } else {
+      toast('删除失败：' + (d.error || ''), 3000);
+    }
+  } catch (e) {
+    toast('删除失败：' + e.message, 3000);
+  }
+};
+refreshMeetings();
+
+// ===== WebSocket 状态 =====
+function setStatus(s, live=false, mode='record') {
+  $('status').textContent = s;
+  $('dot').classList.remove('live', 'live-meeting');
+  if (live) {
+    $('dot').classList.add(mode === 'meeting' ? 'live-meeting' : 'live');
+  }
+}
+
+// ===== AudioWorklet PCM 采集 =====
+const WORKLET_SRC = `
+class PCMSink extends AudioWorkletProcessor {
+  constructor() { super(); this._buf = []; this._bytes = 0; }
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (!ch) return true;
+    // 16kHz mono float32 直接发送 (AudioContext 默认 16k 时 sampleRate=16000)
+    // 否则重采样: 这里假设 AudioContext 已用 16k
+    this.port.postMessage(ch);
+    return true;
+  }
+}
+registerProcessor('pcm-sink', PCMSink);
+`;
+
+async function startAudioCapture() {
+  state.mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  });
+  state.audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  await state.audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET_SRC], {type: 'application/javascript'})));
+  const src = state.audioCtx.createMediaStreamSource(state.mediaStream);
+  state.workletNode = new AudioWorkletNode(state.audioCtx, 'pcm-sink');
+  state.workletNode.port.onmessage = (ev) => {
+    if (!state.sending || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    const f32 = ev.data;
+    state.ws.send(f32.buffer);
+  };
+  src.connect(state.workletNode);
+  // worklet 不需要连到 destination (静音采集)
+}
+
+function stopAudioCapture() {
+  try { state.workletNode && state.workletNode.disconnect(); } catch (e) {}
+  try { state.audioCtx && state.audioCtx.close(); } catch (e) {}
+  try { state.mediaStream && state.mediaStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  state.workletNode = null;
+  state.audioCtx = null;
+  state.mediaStream = null;
+}
+
+// ===== 会话控制 =====
+async function startSession(mode) {
+  // 会议模式: 先建会议
+  let meetingId = null;
+  if (mode === 'meeting') {
+    const title = $('meetingTitle').value.trim() || `会议-${nowHMS()}`;
+    try {
+      const r = await fetch('/api/meeting/new', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title}),
+      });
+      const data = await r.json();
+      meetingId = data.meeting_id;
+      state.meeting = { id: meetingId, title, startedAt: Date.now(), segments: [] };
+      $('bannerTitle').textContent = title;
+      $('meetingBanner').classList.add('active');
+      // 开启新一轮会议: 重置字幕条, 准备累积显示
+      clearCaption();
+    } catch (e) {
+      toast('创建会议失败：' + e.message, 4000);
+      return;
+    }
+  } else {
+    // 录音模式: 不显示字幕条
+    clearCaption();
+  }
+
+  // 启动音频采集
+  try {
+    await startAudioCapture();
+  } catch (e) {
+    toast('麦克风权限被拒绝：' + e.message, 4000);
+    return;
+  }
+
+  // 建 WS
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  state.ws = new WebSocket(`${proto}://${location.host}/ws/asr`);
+  state.ws.binaryType = 'arraybuffer';
+
+  state.ws.onopen = () => {
+    state.ws.send(JSON.stringify({mode, meeting_id: meetingId}));
+    state.mode = mode;
+    state.sending = true;
+    setStatus(mode === 'meeting' ? '录制中' : '录制中', true, mode);
+    showSessionOverlay('recording', mode);
+    $('btnRecord').disabled = true;
+    $('btnMeeting').disabled = true;
+    $('btnStop').disabled = false;
+  };
+
+  state.ws.onmessage = (ev) => {
+    try {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'ready') {
+        $('engineLabel').textContent = m.engine || '?';
+        toast(`已连接 · ${m.engine} (停止后转写)`);
+        return;
+      }
+      if (m.type === 'recording') {
+        // 录制中心跳: 更新录制时长
+        updateRecordingTime(m.duration_s);
+        return;
+      }
+      if (m.type === 'streaming_text') {
+        // 流式 ASR 实时结果: 更新字幕条 + partial 行
+        showCaptionPartial(m.text);
+        // 只在 partial 行显示新文本 (避免与已 finalize 的 segment 重复)
+        if (state.currentPartialEl && state.currentPartialEl.parentElement) {
+          // partial 行已存在, 累加新文本
+          const cur = state.currentPartialText || '';
+          updatePartial(cur + (m.new_text || ''), null);
+        } else {
+          // 新建 partial 行, 只显示本次 chunk 的文本
+          updatePartial(m.new_text || m.text, null);
+        }
+        return;
+      }
+      if (m.type === 'asr_started') {
+        // 服务端开始跑 ASR, 切到转写状态
+        showSessionOverlay('transcribing', mode);
+        return;
+      }
+      if (m.type === 'asr_progress') {
+        updateTranscribeProgress(m.pct, m.msg);
+        return;
+      }
+      if (m.type === 'segment') {
+        // ASR 推过来的句子 (可能是录制中周期识别, 也可能是停止后最终识别)
+        m.ts = nowHMS();
+        m.wall_time = nowISO();
+        addSegment(m);
+        if (state.meeting) {
+          state.meeting.segments.push(m);
+          $('bannerCount').textContent = `${state.meeting.segments.length} 段`;
+        }
+        // 字幕条: 第一个 segment 来时弹出, 后续持续累加
+        if (state.captionMode === 'off' && state.meeting) {
+          showCaptionPartial(m.text);
+        } else {
+          updateCaptionFromSegment(m);
+        }
+        return;
+      }
+      if (m.type === 'asr_done') {
+        // 最终 ASR 完成
+        showSessionOverlay('done', mode, m);
+        if (m.recording_filename) {
+          $('downloadLink').href = `/api/recording/${encodeURIComponent(m.recording_filename)}/download`;
+          $('downloadLink').setAttribute('download', m.recording_filename);
+        }
+        setTimeout(() => {
+          if (state.mode === 'idle') hideSessionOverlay();
+        }, 6000);  // 下载按钮给 6s 让用户看到
+        toast(`转写完成 · ${m.count} 段 · 录音已保存`);
+        return;
+      }
+      if (m.type === 'asr_error') {
+        showSessionOverlay('error', mode, {error: m.error});
+        toast('转写失败：' + m.error, 4000);
+        return;
+      }
+    } catch (e) {}
+  };
+
+  state.ws.onerror = () => toast('WebSocket 错误', 3000);
+  state.ws.onclose = () => {
+    // 关闭时只在 idle 状态下做清理 (stopSession 已经处理过 onclose 的清理)
+    if (state.mode !== 'idle') {
+      setStatus('已断开');
+      $('btnRecord').disabled = false;
+      $('btnMeeting').disabled = false;
+      $('btnStop').disabled = true;
+      if (state.meeting) {
+        finalizeCaption();
+        endMeeting();
+      } else {
+        clearCaption();
+      }
+      state.mode = 'idle';
+      state.sending = false;
+      stopAudioCapture();
+      hideSessionOverlay();
+    }
+  };
+}
+
+// ===== 录制/转写 状态卡 =====
+function showSessionOverlay(phase, mode, info) {
+  const ov = $('sessionOverlay');
+  ov.classList.remove('recording', 'transcribing', 'done', 'error');
+  ov.classList.add(phase);
+  ov.style.display = 'block';
+  if ($('empty').parentElement) $('empty').style.display = 'none';
+
+  if (phase === 'recording') {
+    $('soIcon').textContent = '●';
+    $('soText').textContent = mode === 'meeting' ? '录制中 · 会议' : '录制中';
+    $('soTime').textContent = '00:00';
+    $('soFill').style.width = '0%';
+    $('soPct').textContent = '0%';
+    $('soMsg').textContent = '点击停止开始转写';
+  } else if (phase === 'transcribing') {
+    $('soIcon').textContent = '◐';
+    $('soText').textContent = '转写中';
+    $('soFill').style.width = '0%';
+    $('soPct').textContent = '0%';
+    $('soMsg').textContent = info?.duration_s != null
+      ? `音频 ${info.duration_s}s · 准备中…`
+      : '准备中…';
+  } else if (phase === 'done') {
+    $('soIcon').textContent = '✓';
+    $('soText').textContent = '完成';
+    $('soTime').textContent = `${info?.count ?? 0} 段`;
+    $('soMsg').textContent = info
+      ? `音频 ${info.audio_dur}s · ASR ${info.asr_dur}s · ${(info.audio_dur > 0 ? (info.audio_dur / Math.max(info.asr_dur, 0.1)).toFixed(1) : '?')}× realtime`
+      : '';
+  } else if (phase === 'error') {
+    $('soIcon').textContent = '✕';
+    $('soText').textContent = '出错';
+    $('soTime').textContent = '—';
+    $('soMsg').textContent = info?.error || '未知错误';
+  }
+}
+
+function updateRecordingTime(duration_s) {
+  const total = Math.max(0, Math.floor(duration_s || 0));
+  $('soTime').textContent = elideSec(total);
+}
+
+function updateTranscribeProgress(pct, msg) {
+  const p = Math.max(0, Math.min(100, pct || 0));
+  $('soFill').style.width = p + '%';
+  $('soPct').textContent = p + '%';
+  if (msg) $('soMsg').textContent = msg;
+}
+
+function hideSessionOverlay() {
+  $('sessionOverlay').style.display = 'none';
+  $('empty').style.display = 'block';
+}
+
+async function stopSession() {
+  if (state.mode === 'idle') return;
+  state.sending = false;
+  // 停采集 (服务端拿到最后一段 PCM 后会 stop)
+  stopAudioCapture();
+  setStatus('停止中…');
+  $('btnRecord').disabled = true;
+  $('btnMeeting').disabled = true;
+  $('btnStop').disabled = true;
+  // 通知服务端停止 → 服务端会切到 ASR 阶段, WS 保持连接
+  try {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify({type: 'stop'}));
+    }
+  } catch (e) {}
+  // 不要立即关 WS: 等服务端推 asr_done / asr_error 后由 onclose 清理
+  // 兜底: 60s 没收到结果就强制关
+  setTimeout(() => {
+    if (state.mode !== 'idle' && state.ws && state.ws.readyState === WebSocket.OPEN) {
+      console.warn('[stop] 60s 没收到结果, 强制关闭 WS');
+      try { state.ws.close(); } catch (e) {}
+    }
+    }, 60000);
+}
+
+async function endMeeting() {
+  if (!state.meeting) return;
+  try {
+    await fetch(`/api/meeting/${state.meeting.id}/finish`, {method: 'POST'});
+    toast('会议已结束，已保存 JSON');
+  } catch (e) {
+    toast('结束会议失败：' + e.message, 3000);
+  }
+  state.meeting = null;
+  $('meetingBanner').classList.remove('active');
+  refreshMeetings();
+}
+
+// ===== 模型状态轮询 =====
+async function pollModels() {
+  try {
+    const r = await fetch('/api/models/status');
+    const s = await r.json();
+    renderLoading(s);
+    if (s.gpu) {
+      $('gpuLabel').textContent = `${s.gpu.name} · ${s.gpu.used_mb}/${s.gpu.total_mb}MB · ${s.gpu.util_pct}%`;
+    }
+    if (s.ready) {
+      $('loadingOverlay').classList.remove('active');
+      $('btnRecord').disabled = false;
+      $('btnMeeting').disabled = false;
+    } else {
+      $('loadingOverlay').classList.add('active');
+    }
+  } catch (e) {}
+}
+
+function renderLoading(s) {
+  const chips = $('modelChips');
+  const order = ['vad', 'spk', 'paraformer', 'nano'];
+  const labels = {vad: 'VAD (FSMN)', spk: '说话人 (cam++)', paraformer: 'Paraformer-online', nano: 'Fun-ASR-Nano'};
+  chips.innerHTML = order.map(k => {
+    const m = s.models[k];
+    let cls = 'loading';
+    if (m.loaded) cls = 'loaded';
+    return `<span class="model-chip ${cls}">${labels[k]}</span>`;
+  }).join('');
+  $('loadingLabel').textContent = s.ready ? '就绪' : '模型加载中…首次启动约需 30-60s';
+}
+
+setInterval(pollModels, 2000);
+pollModels();
+
+// ===== 按钮绑定 =====
+$('btnRecord').addEventListener('click', () => startSession('record'));
+$('btnMeeting').addEventListener('click', () => startSession('meeting'));
+$('btnStop').addEventListener('click', stopSession);
+
+// ===== 文件转写面板 =====
+// 来源 tab 切换
+document.querySelectorAll('.src-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const src = tab.dataset.src;
+    document.querySelectorAll('.src-tab').forEach(t => t.classList.toggle('on', t === tab));
+    document.querySelectorAll('.src-pane').forEach(p => p.style.display = (p.dataset.src === src ? 'block' : 'none'));
+  });
+});
+
+const tpProgress = $('transcribeProgress');
+const tpStage = $('tpStage');
+const tpFill = $('tpFill');
+const tpPct = $('tpPct');
+const tpResult = $('tpResult');
+const tpStat = $('tpStat');
+let currentJobId = null;
+
+$('btnTranscribe').addEventListener('click', async () => {
+  const model = document.querySelector('input[name="asrModel"]:checked').value;
+  const fileInput = $('transcribeFile');
+  const urlInput = $('transcribeUrl');
+  const activeSrc = document.querySelector('.src-tab.on').dataset.src;
+
+  let endpoint, body, headers = {};
+  if (activeSrc === 'file') {
+    const f = fileInput.files[0];
+    if (!f) { toast('请选择文件', 2000); return; }
+    endpoint = '/api/transcribe/upload';
+    body = new FormData();
+    body.append('file', f);
+    body.append('model', model);
+  } else {
+    const u = urlInput.value.trim();
+    if (!u) { toast('请输入 URL', 2000); return; }
+    endpoint = '/api/transcribe/url';
+    body = JSON.stringify({url: u, model});
+    headers['Content-Type'] = 'application/json';
+  }
+
+  $('btnTranscribe').disabled = true;
+  $('btnTranscribe').textContent = '排队中…';
+  tpProgress.style.display = 'block';
+  tpProgress.classList.remove('error', 'done');
+  tpResult.style.display = 'none';
+  tpStage.textContent = '提交任务…';
+  tpFill.style.width = '0%';
+  tpPct.textContent = '0%';
+
+  try {
+    const r = await fetch(endpoint, {method: 'POST', body, headers});
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    currentJobId = data.job_id;
+    $('btnTranscribe').textContent = '转写中…';
+    listenJobEvents(currentJobId);
+  } catch (e) {
+    tpStage.textContent = '提交失败：' + e.message;
+    tpProgress.classList.add('error');
+    $('btnTranscribe').disabled = false;
+    $('btnTranscribe').textContent = '开始转写';
+  }
+});
+
+function listenJobEvents(jobId) {
+  const es = new EventSource(`/api/transcribe/${jobId}/events`);
+  es.onmessage = (ev) => {
+    try {
+      const m = JSON.parse(ev.data);
+      handleJobEvent(m);
+      if (m.stage === 'done' || m.stage === 'error') es.close();
+    } catch (e) {}
+  };
+  es.onerror = () => { es.close(); };
+}
+
+function handleJobEvent(m) {
+  // 兼容旧 worker 报 "loading_model" 阶段, 改成 "使用已加载的模型"
+  let msg = m.msg || m.stage;
+  if (m.stage === 'loading_model') {
+    msg = '使用已加载的 ' + (m.msg?.replace(/^加载模型\s*/, '') || '') + ' 模型';
+  }
+  tpStage.textContent = msg;
+  const pct = Math.max(0, Math.min(100, m.pct || 0));
+  tpFill.style.width = pct + '%';
+  tpPct.textContent = pct + '%';
+
+  if (m.stage === 'done') {
+    tpProgress.classList.add('done');
+    $('btnTranscribe').disabled = false;
+    $('btnTranscribe').textContent = '开始转写';
+    const r = m.result || {};
+    tpResult.style.display = 'block';
+    tpStat.innerHTML = `
+      <div>音频 ${r.audio_dur?.toFixed(1) || '?'}s · ASR ${r.asr_dur?.toFixed(1) || '?'}s · ${(1/(r.rtf||1)).toFixed(1)}× realtime</div>
+      <div>${r.n_segments || 0} 段 · 模型 ${r.model}</div>
+      <div style="color:var(--text-faint);font-size:10px;margin-top:4px;word-break:break-all">${r.srt || ''}</div>
+    `;
+  } else if (m.stage === 'error') {
+    tpProgress.classList.add('error');
+    $('btnTranscribe').disabled = false;
+    $('btnTranscribe').textContent = '开始转写';
+  }
+}
+
+$('tpDownloadSrt').addEventListener('click', () => {
+  if (currentJobId) window.location.href = `/api/transcribe/${currentJobId}/download/srt`;
+});
+$('tpDownloadJson').addEventListener('click', () => {
+  if (currentJobId) window.location.href = `/api/transcribe/${currentJobId}/download/json`;
+});
+
+// 切走自动停
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && state.mode !== 'idle') stopSession();
+});
+
+// 键盘快捷键
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (state.mode !== 'idle') stopSession();
+    else $('app').classList.toggle('panel-collapsed');
+  }
+  if (e.key === ' ' && e.target.tagName !== 'INPUT') {
+    e.preventDefault();
+    if (state.mode === 'idle') startSession('record');
+    else stopSession();
+  }
+});
+</script>
+
+</body>
+</html>
